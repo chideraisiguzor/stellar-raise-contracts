@@ -28,26 +28,32 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install soroban-cli
-        run: cargo install soroban-cli
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli
 
       - name: Build WASM binary
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32-unknown-unknown --release -p crowdfund
+
+      - name: Configure testnet network
+        run: |
+          stellar network add testnet \
+            --rpc-url $RPC_URL \
+            --network-passphrase "$NETWORK_PASSPHRASE"
 
       - name: Configure testnet identity from secret
         env:
           TESTNET_SECRET_KEY: ${{ secrets.TESTNET_SECRET_KEY }}
         run: |
-          soroban keys add ci-deployer --secret-key $TESTNET_SECRET_KEY
+          stellar keys add ci-deployer --secret-key "$TESTNET_SECRET_KEY"
 
       - name: Fund testnet account via Friendbot
         run: |
-          soroban keys fund ci-deployer --network $NETWORK
+          stellar keys fund ci-deployer --network $NETWORK
 
       - name: Deploy contract to testnet
         id: deploy
         run: |
-          CONTRACT_ID=$(soroban contract deploy \
+          CONTRACT_ID=$(stellar contract deploy \
             --wasm target/wasm32-unknown-unknown/release/crowdfund.wasm \
             --network $NETWORK \
             --source ci-deployer)
@@ -57,8 +63,8 @@ jobs:
       - name: Initialize campaign
         run: |
           DEADLINE=$(( $(date +%s) + 86400 ))
-          CI_ADDR=$(soroban keys address ci-deployer)
-          soroban contract invoke \
+          CI_ADDR=$(stellar keys address ci-deployer)
+          stellar contract invoke \
             --id $CONTRACT_ID \
             --network $NETWORK \
             --source ci-deployer \
@@ -72,7 +78,7 @@ jobs:
 
       - name: Assert campaign goal is set
         run: |
-          RESULT=$(soroban contract invoke \
+          RESULT=$(stellar contract invoke \
             --id $CONTRACT_ID \
             --network $NETWORK \
             --source ci-deployer \
@@ -85,7 +91,7 @@ jobs:
 
       - name: Query and log campaign stats
         run: |
-          soroban contract invoke \
+          stellar contract invoke \
             --id $CONTRACT_ID \
             --network $NETWORK \
             --source ci-deployer \
