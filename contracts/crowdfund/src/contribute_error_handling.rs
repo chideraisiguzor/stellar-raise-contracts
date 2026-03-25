@@ -4,7 +4,11 @@
 //! `ContractError` variants, enabling scripts and CI/CD pipelines to handle
 //! errors programmatically.
 //!
-//! # Error taxonomy for `contribute()`
+//! @notice  All error conditions that can arise during a contribution are
+//!          represented as typed `ContractError` variants.  This module
+//!          re-exports their numeric codes and provides off-chain helpers so
+//!          scripts can map a raw error code to a human-readable description
+//!          without embedding magic numbers.
 //!
 //! | Code | Variant              | Trigger                                          |
 //! |------|----------------------|--------------------------------------------------|

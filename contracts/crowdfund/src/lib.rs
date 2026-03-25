@@ -468,7 +468,7 @@ impl CrowdfundContract {
             .get(&DataKey::MinContribution)
             .unwrap();
         if amount < min_contribution {
-            panic!("amount below minimum");
+            return Err(ContractError::AmountTooLow);
         }
 
         let deadline: u64 = env.storage().instance().get(&DataKey::Deadline).unwrap();
