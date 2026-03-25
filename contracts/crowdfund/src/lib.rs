@@ -1,5 +1,4 @@
 #![no_std]
-#![allow(missing_docs)]
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
@@ -23,6 +22,7 @@ use refund_single_token::{
 #[path = "refund_single_token.test.rs"]
 mod refund_single_token_test;
 
+pub mod admin_upgrade_mechanism;
 pub mod soroban_sdk_minor;
 
 #[cfg(test)]
@@ -30,10 +30,8 @@ mod auth_tests;
 pub mod campaign_goal_minimum;
 #[cfg(test)]
 mod campaign_goal_minimum_test;
-pub mod contract_state_size;
 #[cfg(test)]
-#[path = "contract_state_size.test.rs"]
-mod contract_state_size_test;
+mod admin_upgrade_mechanism_test;
 pub mod contribute_error_handling;
 #[cfg(test)]
 mod contribute_error_handling_tests;
@@ -66,6 +64,7 @@ pub enum Status {
     Cancelled,
 }
 
+/// Represents a single roadmap milestone with a date and description.
 #[derive(Clone)]
 #[contracttype]
 pub struct RoadmapItem {
@@ -73,6 +72,7 @@ pub struct RoadmapItem {
     pub description: String,
 }
 
+/// Platform fee configuration: the recipient address and fee in basis points.
 #[derive(Clone)]
 #[contracttype]
 pub struct PlatformConfig {
@@ -80,7 +80,7 @@ pub struct PlatformConfig {
     pub fee_bps: u32,
 }
 
-/// Represents all storage keys used by the crowdfund contract.
+/// Snapshot of campaign funding statistics returned by [`CrowdfundContract::get_stats`].
 #[derive(Clone)]
 #[contracttype]
 pub struct CampaignStats {
@@ -92,22 +92,31 @@ pub struct CampaignStats {
     pub largest_contribution: i128,
 }
 
+/// Represents all storage keys used by the crowdfund contract.
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     /// The address of the campaign creator.
     Creator,
+    /// The token contract address used for contributions.
     Token,
+    /// The funding goal in token units.
     Goal,
+    /// The campaign deadline as a Unix timestamp.
     Deadline,
+    /// The running total of tokens raised.
     TotalRaised,
+    /// Individual contribution amount keyed by contributor address.
     Contribution(Address),
+    /// List of all contributor addresses.
     Contributors,
+    /// Current campaign status.
     Status,
+    /// Minimum contribution amount.
     MinContribution,
     /// Individual pledge by address (for conditional pledges).
     Pledge(Address),
-    /// Total amount pledged but not yet claimed.
+    /// Total amount pledged but not yet collected.
     TotalPledged,
     /// Stretch goals for bonus milestones.
     StretchGoals,
@@ -121,11 +130,15 @@ pub enum DataKey {
     Pledgers,
     /// List of roadmap items with dates and descriptions.
     Roadmap,
+    /// The designated admin address (set to creator at initialization).
     Admin,
+    /// Campaign title.
     Title,
     /// Campaign description.
     Description,
+    /// Campaign social links.
     SocialLinks,
+    /// Platform fee configuration.
     PlatformConfig,
     /// Optional NFT contract used for contributor reward minting.
     NFTContract,
@@ -135,31 +148,37 @@ pub enum DataKey {
 
 use soroban_sdk::contracterror;
 
+/// Errors that can be returned by the crowdfund contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
+    /// The contract has already been initialized.
     AlreadyInitialized = 1,
+    /// The campaign deadline has passed.
     CampaignEnded = 2,
+    /// The campaign deadline has not yet passed.
     CampaignStillActive = 3,
+    /// The funding goal was not reached.
     GoalNotReached = 4,
+    /// The funding goal has already been reached.
     GoalReached = 5,
+    /// An arithmetic overflow occurred.
     Overflow = 6,
     /// Returned by `refund_single` when the caller has no contribution to refund.
     NothingToRefund = 7,
-    /// Returned by `contribute` when `amount` is zero.
-    ZeroAmount = 8,
-    /// Returned by `contribute` when `amount` is below `min_contribution`.
-    BelowMinimum = 9,
-    /// Returned by `contribute` when the campaign is not active.
-    CampaignNotActive = 10,
+    /// Returned when the campaign goal is below the minimum allowed threshold.
+    GoalTooLow = 8,
 }
 
+/// Interface for an external NFT contract used to mint contributor rewards.
 #[contractclient(name = "NftContractClient")]
 pub trait NftContract {
+    /// Mints an NFT to the given address and returns the new token ID.
     fn mint(env: Env, to: Address) -> u128;
 }
 
+/// The main crowdfunding contract.
 #[contract]
 pub struct CrowdfundContract;
 
@@ -228,6 +247,16 @@ impl CrowdfundContract {
 
         env.storage().instance().set(&DataKey::Creator, &creator);
         env.storage().instance().set(&DataKey::Token, &token);
+
+        // Returns the list of all contributor addresses.
+        #[allow(dead_code)]
+        pub fn contributors(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get(&DataKey::Contributors)
+                .unwrap_or(Vec::new(&env))
+        }
+
         env.storage().instance().set(&DataKey::Goal, &goal);
         env.storage().instance().set(&DataKey::Deadline, &deadline);
         env.storage()
@@ -285,7 +314,7 @@ impl CrowdfundContract {
             .get(&DataKey::MinContribution)
             .unwrap();
         if amount < min_contribution {
-            return Err(ContractError::BelowMinimum);
+            return Err(ContractError::AmountTooLow);
         }
 
         let deadline: u64 = env.storage().instance().get(&DataKey::Deadline).unwrap();
@@ -406,7 +435,7 @@ impl CrowdfundContract {
             .get(&DataKey::MinContribution)
             .unwrap();
         if amount < min_contribution {
-            panic!("amount below minimum");
+            return Err(ContractError::AmountTooLow);
         }
 
         let deadline: u64 = env.storage().instance().get(&DataKey::Deadline).unwrap();
@@ -783,20 +812,10 @@ impl CrowdfundContract {
 
     /// Upgrade the contract to a new WASM implementation — admin-only.
     ///
-    /// This function allows the designated admin to upgrade the contract's WASM code
-    /// without changing the contract's address or storage. The new WASM hash must be
-    /// provided and the caller must be authorized as the admin.
-    ///
-    /// # Arguments
-    /// * `new_wasm_hash` – The SHA-256 hash of the new WASM binary to deploy.
-    ///
-    /// # Panics
-    /// * If the caller is not the admin.
+    /// Delegates to [`admin_upgrade_mechanism::upgrade`]. See that module for
+    /// full NatSpec documentation and security assumptions.
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        admin_upgrade_mechanism::upgrade(&env, new_wasm_hash);
     }
 
     /// Update campaign metadata — only callable by the creator while the
@@ -901,6 +920,11 @@ impl CrowdfundContract {
         );
     }
 
+    /// Add a roadmap item — only callable by the creator.
+    ///
+    /// # Arguments
+    /// * `date`        – Future Unix timestamp for the milestone.
+    /// * `description` – Non-empty description of the milestone.
     pub fn add_roadmap_item(env: Env, date: u64, description: String) {
         let creator: Address = env.storage().instance().get(&DataKey::Creator).unwrap();
         creator.require_auth();
@@ -939,6 +963,7 @@ impl CrowdfundContract {
             .publish(("campaign", "roadmap_item_added"), (date, description));
     }
 
+    /// Returns all roadmap items for the campaign.
     pub fn roadmap(env: Env) -> Vec<RoadmapItem> {
         env.storage()
             .instance()
@@ -1001,6 +1026,7 @@ impl CrowdfundContract {
 
         0
     }
+    /// Returns the total amount of tokens raised so far.
     pub fn total_raised(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -1008,6 +1034,7 @@ impl CrowdfundContract {
             .unwrap_or(0)
     }
 
+    /// Returns the campaign funding goal.
     pub fn goal(env: Env) -> i128 {
         env.storage().instance().get(&DataKey::Goal).unwrap()
     }
@@ -1066,6 +1093,7 @@ impl CrowdfundContract {
         env.storage().instance().get(&DataKey::Deadline).unwrap()
     }
 
+    /// Returns the contribution amount for a given contributor.
     pub fn contribution(env: Env, contributor: Address) -> i128 {
         env.storage()
             .persistent()
@@ -1073,6 +1101,7 @@ impl CrowdfundContract {
             .unwrap_or(0)
     }
 
+    /// Returns the minimum contribution amount required.
     pub fn min_contribution(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -1134,6 +1163,7 @@ impl CrowdfundContract {
         }
     }
 
+    /// Returns the campaign title.
     pub fn title(env: Env) -> String {
         env.storage()
             .instance()
@@ -1141,6 +1171,7 @@ impl CrowdfundContract {
             .unwrap_or_else(|| String::from_str(&env, ""))
     }
 
+    /// Returns the campaign description.
     pub fn description(env: Env) -> String {
         env.storage()
             .instance()
@@ -1148,6 +1179,7 @@ impl CrowdfundContract {
             .unwrap_or_else(|| String::from_str(&env, ""))
     }
 
+    /// Returns the campaign social links.
     pub fn socials(env: Env) -> String {
         env.storage()
             .instance()
@@ -1155,6 +1187,7 @@ impl CrowdfundContract {
             .unwrap_or_else(|| String::from_str(&env, ""))
     }
 
+    /// Returns the contract version number.
     pub fn version(_env: Env) -> u32 {
         CONTRACT_VERSION
     }
